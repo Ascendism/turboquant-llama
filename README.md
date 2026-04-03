@@ -14,7 +14,7 @@ LLM inference in C/C++
 
 **This repository exists to distribute [TurboQuant](https://arxiv.org/abs/2504.19874)** ([blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)) **KV cache quantization inside llama.cpp**, with **CUDA** Flash Attention integration, custom kernels, and **`turbo2` / `turbo3` / `turbo4`** cache types—that is the main point of the fork.
 
-Secondary: small **GGUF + Qwen 3.5 hybrid** loader/graph patches so certain checkpoints run (see **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)**). Lineage: [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant) scaffolding; CUDA stack from **`feature/turboquant-kv-cache`** on [spiritbuun/llama-cpp-turboquant-cuda](https://github.com/spiritbuun/llama-cpp-turboquant-cuda), merged into **`master` here** with upstream llama.cpp.
+Secondary: small **GGUF + Qwen 3.5 hybrid** loader/graph patches so certain checkpoints run (see **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)**). **`llama-server`** is built from this same repo (not a separate project)—see **“llama-server with this fork”** in that doc for naming and packaging. Lineage: [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant) scaffolding; CUDA stack from **`feature/turboquant-kv-cache`** on [spiritbuun/llama-cpp-turboquant-cuda](https://github.com/spiritbuun/llama-cpp-turboquant-cuda), merged into **`master` here** with upstream llama.cpp.
 
 ## TurboQuant CUDA KV Cache Quantization
 

@@ -23,6 +23,25 @@ The bulk of the tree still tracks upstream llama.cpp; the intentional deltas are
 
 ---
 
+## `llama-server` with this fork
+
+**There is no separate server codebase.** `llama-server` is the HTTP entry point in **`tools/server/`**; it links the same **`llama` / ggml** library as **`llama-cli`**, so TurboQuant KV types and CUDA paths apply identically. Build it from this tree (e.g. `cmake --build <build-dir> --config Release --target llama-server`).
+
+**How to refer to it**
+
+- In docs and support: **“llama-server built from [this repo](https://github.com/CarapaceUDE/turboquant-llama)”** or **“TurboQuant llama.cpp server”** if you need a short label. The executable name stays **`llama-server`** so scripts and process supervisors stay compatible.
+- Avoid implying a different API product unless you fork the HTTP layer; REST behavior follows upstream **[tools/server/README.md](../tools/server/README.md)** with the same caveats as stock llama.cpp, plus this fork’s runtime options (**`--cache-type-k` / `--cache-type-v`** `turbo2` / `turbo3` / `turbo4`, Flash Attention flags, `TURBO_LAYER_ADAPTIVE`, etc.).
+
+**Packaging (practical)**
+
+- Ship **`llama-server`** together with **`llama-cli`** (optional) and **the same shared libraries** your platform loads (`ggml*.dll` / `.so`, CUDA deps). Version them with **one git commit** or **one release tag** for both binaries so KV/quant behavior cannot drift.
+- Container images: base layer = this repo’s build; default command can be `llama-server` with env for turbo cache types.
+- For public releases, a name like **`turboquant-llama-<version>`** for the *artifact zip* is fine; inside, keep **`llama-server`** as the binary name unless you add a tiny wrapper script.
+
+**Developer notes:** [tools/server/README-dev.md](../tools/server/README-dev.md)
+
+---
+
 ## Secondary patches (non–TurboQuant)
 
 These exist so specific **GGUF** and **Qwen 3.5 / MoE / Next hybrid** checkpoints load and run correctly; they are not the primary goal of the fork.
