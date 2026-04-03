@@ -1,105 +1,71 @@
-# Fork changes (this repo vs upstream)
+# Why this repository exists: TurboQuant in llama.cpp
 
-This tree is a **downstream fork** of **[ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)** (and its bundled **ggml** submodule / vendored sources as shipped in that project). Upstream is merged periodically so the bulk of the code is identical to stock llama.cpp at the merged revision.
+**This project is a fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) whose reason to exist is shipping a full in-tree [TurboQuant](https://arxiv.org/abs/2504.19874)–style **KV cache** stack on **CUDA** (and related ggml integration): new quant types, kernels, Flash Attention paths, and graph hooks so you can run **`--cache-type-k` / `--cache-type-v`** with **turbo2 / turbo3 / turbo4** with Flash Attention where required.
 
-The sections below describe **only the intentional differences** we maintain on top of upstream, **why** they exist, and **where** they live in the source.
+The bulk of the tree still tracks upstream llama.cpp; the intentional deltas are **TurboQuant first**, then a **small set of compatibility patches** for certain GGUFs and Qwen 3.5 / hybrid models (see below).
+
+**Deep dive (CUDA, block layouts, files touched):** [TURBOQUANT_CUDA_IMPLEMENTATION.md](../TURBOQUANT_CUDA_IMPLEMENTATION.md)  
+**Usage, benchmarks, build flags:** [README](../README.md) (TurboQuant section near the top)
+
+**Code map (quick):**
+
+| Area | Where to look |
+|------|----------------|
+| Tensor types & CPU quant/dequant | `ggml/include/ggml.h`, `ggml/src/ggml-turbo-quant.c`, `ggml/src/ggml-common.h`, `ggml/src/ggml-quants.h` |
+| CUDA SET_ROWS / GET_ROWS / helpers | `ggml/src/ggml-cuda/turbo-quant-cuda.cuh`, `turbo-wht.cu`, `turbo-sink.cu`, `getrows.cu`, `set-rows.cu`, `ggml-cuda.cu` |
+| Flash Attention + turbo K/V | `ggml/src/ggml-cuda/fattn*.cu`, `fattn*.cuh`, `template-instances/fattn-vec-*turbo*` |
+| Graph / KV | `src/llama-graph.cpp`, `src/llama-kv-cache*.cpp`, `src/llama-context.cpp` |
+| Metal (Apple) | `ggml/src/ggml-metal/*` (turbo-related headers/shaders on branch history) |
+
+**Lineage:** Scaffold and types from [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant); CUDA KV + FA work continued on **`feature/turboquant-kv-cache`** at [spiritbuun/llama-cpp-turboquant-cuda](https://github.com/spiritbuun/llama-cpp-turboquant-cuda), now **merged into `master` here** together with periodic **upstream `master`** merges.
+
+**Paper / blog:** [arXiv:2504.19874](https://arxiv.org/abs/2504.19874), [Google Research blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
 
 ---
 
-## Summary
+## Secondary patches (non–TurboQuant)
 
-| Goal | Files typically involved |
-|------|---------------------------|
-| **TurboQuant-style** KV cache types (`GGML_TYPE_TURBO2_0`, **turbo3**, **turbo4**), FWHT / QJL paths, CUDA Flash Attention vec + prefill integration | `ggml/` (types, CUDA: `fattn*.cu` / `*.cuh`, quant kernels, `template-instances/fattn-vec-*turbo*`, etc.), `src/llama-graph.cpp`, KV cache sources |
-| Load certain **GGUF** layouts (e.g. rope metadata, hybrid attention) that stock loaders reject or mis-shape | `src/llama-model-loader.cpp`, `src/llama-model.cpp` |
-| Run **Qwen 3.5** / **Qwen 3.5 MoE** / **Qwen3 Next** graphs where head counts, RoPE width, and optional linear-attention tensors vary **by layer** | `src/models/qwen35.cpp`, `src/models/qwen35moe.cpp`, `src/models/qwen3next.cpp` |
+These exist so specific **GGUF** and **Qwen 3.5 / MoE / Next hybrid** checkpoints load and run correctly; they are not the primary goal of the fork.
 
-The large TurboQuant implementation lived on **`origin/feature/turboquant-kv-cache`** ([spiritbuun/llama-cpp-turboquant-cuda](https://github.com/spiritbuun/llama-cpp-turboquant-cuda)) and is **merged into `master` here** together with upstream llama.cpp. That branch also carried **`tools/server/`** and related tweaks; this repo may differ from stock llama.cpp in server/UI files for that reason.
-
----
-
-## 1. GGUF loader: `rope_dimension_sections` and `get_arr<int[4]>`
+### A. GGUF loader: `rope_dimension_sections`
 
 **Files:** `src/llama-model-loader.cpp`, `src/llama-model.cpp`
 
-**What changed**
+Try `get_arr` for `LLM_KV_ROPE_DIMENSION_SECTIONS` before strict length-4 `get_key_or_arr`, so GGUFs with **three** IM-RoPE section entries still load (remainder stays zero-padded).
 
-- Explicit template instantiation: `llama_model_loader::get_arr<std::array<int, 4>>(...)`.
-- When loading hyperparameters for affected architectures, the code **first** tries `get_arr(LLM_KV_ROPE_DIMENSION_SECTIONS, hparams.rope_sections, …)` so the array is filled **without** requiring exactly four elements in the GGUF list.
-- If that fails, it falls back to the previous strict `get_key_or_arr(..., 4)` path.
+### B. Qwen hybrid: per-layer attention tensor shapes
 
-**Why**
+**File:** `src/llama-model.cpp` (`load_tensors`)
 
-Some GGUFs (including blobs produced or transformed in ways similar to **Ollama** tooling) store **three** IM-RoPE section sizes instead of four. The strict “must be length 4” path fails loading even though the remainder can be zero-padded safely (`rope_sections` is zero-filled before this logic runs).
+Full attention layers use per-layer `n_embd_head_k(i)`, `n_head(i)`, GQA widths, so dimensions match hybrid stacks (attention vs recurrent blocks).
 
----
-
-## 2. Tensor creation: per-layer attention dimensions (Qwen hybrid stacks)
-
-**File:** `src/llama-model.cpp` (`load_tensors`, for the relevant Qwen 3.5–family / hybrid blocks)
-
-**What changed**
-
-- For full attention layers, projection and norm tensor shapes use **per-layer** helpers, for example:
-  - `hparams.n_embd_head_k(i)`, `hparams.n_head(i)`
-  - `hparams.n_embd_k_gqa(i)`, `hparams.n_embd_v_gqa(i)`
-- instead of a single global `n_head` / `n_embd_head_k` / GQA width for every layer.
-
-**Why**
-
-Hybrid models interleave **standard multi-head attention** layers with **structured / linear attention** (gated delta net / Mamba-style) blocks. Global head counts do not match every layer’s stored weights; using layer **i**’s metadata aligns tensor dimensions with the GGUF and avoids load or runtime shape errors.
-
----
-
-## 3. Optional `ssm_dt` (linear / recurrent blocks)
+### C. Optional `ssm_dt`
 
 **Files:** `src/llama-model.cpp`, `src/models/qwen35.cpp`, `src/models/qwen35moe.cpp`, `src/models/qwen3next.cpp`
 
-**What changed**
+`LLM_TENSOR_SSM_DT` is optional; graph uses the bias only when present.
 
-- In `load_tensors`, the `LLM_TENSOR_SSM_DT` tensor is created with `TENSOR_NOT_REQUIRED` instead of being mandatory.
-- In the graph, `alpha_biased` uses `ggml_add(..., ssm_dt)` **only when** `ssm_dt` is non-null; otherwise the branch skips the add.
-
-**Why**
-
-Not all checkpoints ship this bias. Requiring it breaks loading; optional handling matches optional weights.
-
----
-
-## 4. Model graph: layer-local RoPE and head counts
+### D. Layer-local RoPE / heads in graph builders
 
 **Files:** `src/models/qwen35.cpp`, `src/models/qwen35moe.cpp`, `src/models/qwen3next.cpp`
 
-**What changed**
+Attention uses `hparams.n_embd_head_v(il)`, `n_head(il)`, `n_rot(il)`, etc., instead of global-only constants.
 
-- Attention build paths read **`hparams.n_embd_head_v(il)`**, **`n_head(il)`**, **`n_head_kv(il)`**, **`n_rot(il)`** (and matching asserts on `n_embd_head_k(il)`), instead of only global `n_embd_head` / `n_head` / `n_rot`.
-- Reshapes/views for Q/K/V, gates, and MRoPE use those **per-layer** values.
-
-**Why**
-
-Matches variable geometry per layer in Qwen 3.5 / Next hybrids so attention and RoPE see the same shapes as the loaded tensors.
+The TurboQuant merge may also include **`tools/server/`** diffs vs stock llama.cpp from the same branch history.
 
 ---
 
 ## History and syncing
 
-- **`9952377d3`**: Qwen/hybrid GGUF snapshot (small `src/` patch) before syncing upstream.
-- **`96f85f69c`**: merge of **`ggml-org/llama.cpp`** `master` (as of **`43a4ee4a2`**) on top of that snapshot.
-- **`origin/feature/turboquant-kv-cache`**: full TurboQuant stack (~86 commits on top of the shared merge-base with old `master`); **merged into this repo’s `master`** after the upstream sync so CUDA KV + FA paths are present again.
-- Tag **`backup/pre-upstream-merge-2026-04-03`**: points at **`9952377d3`** (Qwen-only snapshot, no TurboQuant merge).
+- **`9952377d3`**: Qwen/hybrid `src/` snapshot (before a large upstream merge).
+- **`96f85f69c`**: merge upstream **`ggml-org/llama.cpp`** (tip **`43a4ee4a2`** at the time).
+- Merge of **`origin/feature/turboquant-kv-cache`**: restores full TurboQuant stack on top of that line (resolve carefully vs upstream BF16 FA, etc.).
+- **`backup/pre-upstream-merge-2026-04-03`**: tag on **`9952377d3`** only (no TurboQuant merge).
 
-Routine maintenance: **`git fetch upstream`** then merge **`upstream/master`** (expect conflicts in CUDA FA / KV code; re-test TurboQuant configs). See **[docs/build.md](build.md)** for build options.
-
----
-
-## TurboQuant (Google Research–style KV compression)
-
-This is a **first-order / primary implementation inside llama.cpp**: new **ggml tensor types**, **CPU reference** quant/dequant, **KV cache** integration, **CUDA** `SET_ROWS` / `GET_ROWS` / **Flash Attention vec + prefill** paths, **graph** hooks (`ggml_turbo_wht`, etc.), and (on the branch history) **Metal** support—not a thin wrapper around some external library. It is **not** Google’s own official release; it follows the published method (rotation groups, PolarQuant / Lloyd-Max centroids, QJL-style residual handling for turbo4, etc.) on top of [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant) scaffolding, with CUDA filled in as described in **[TURBOQUANT_CUDA_IMPLEMENTATION.md](../TURBOQUANT_CUDA_IMPLEMENTATION.md)**.
-
-Implemented types and usage are also summarized in **[README](../README.md)**. Quick code pointers: **`GGML_TYPE_TURBO2_0`**, **`TURBO3_0`**, **`TURBO4_0`**, **`ggml-turbo-quant.c`**, **`ggml/src/ggml-cuda/turbo-*.cu`** / **`turbo-quant-cuda.cuh`**, **`fattn-vec-*turbo*`** instances. Paper: [arXiv:2504.19874](https://arxiv.org/abs/2504.19874) (see also [Google Research blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)).
+Ongoing: **`git fetch upstream`**, merge **`upstream/master`**, rebuild, and re-test **turbo3/turbo4 + `-fa`** workloads. See **[docs/build.md](build.md)**.
 
 ---
 
 ## License
 
-Upstream **llama.cpp** is provided under its existing license(s) as in **`LICENSE`**. This file is documentation only and does not change licensing of third-party code.
+Upstream **llama.cpp** remains under its **`LICENSE`**. This file is documentation only.

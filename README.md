@@ -10,15 +10,15 @@
 
 LLM inference in C/C++
 
-## This fork
+## This fork: TurboQuant first
 
-Downstream fork: **TurboQuant** KV-cache paths (CUDA) plus **GGUF / Qwen 3.5 hybrid** loader and graph fixes. See **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)** for a concise file-level list. The section below describes the TurboQuant stack in more detail.
+**This repository exists to distribute [TurboQuant](https://arxiv.org/abs/2504.19874)** ([blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)) **KV cache quantization inside llama.cpp**, with **CUDA** Flash Attention integration, custom kernels, and **`turbo2` / `turbo3` / `turbo4`** cache types—that is the main point of the fork.
 
-> **Upstream TurboQuant lineage**: CUDA TurboQuant work originated from [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant) and continues on branch **`feature/turboquant-kv-cache`** on [spiritbuun/llama-cpp-turboquant-cuda](https://github.com/spiritbuun/llama-cpp-turboquant-cuda).
+Secondary: small **GGUF + Qwen 3.5 hybrid** loader/graph patches so certain checkpoints run (see **[docs/FORK-CHANGES.md](docs/FORK-CHANGES.md)**). Lineage: [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant) scaffolding; CUDA stack from **`feature/turboquant-kv-cache`** on [spiritbuun/llama-cpp-turboquant-cuda](https://github.com/spiritbuun/llama-cpp-turboquant-cuda), merged into **`master` here** with upstream llama.cpp.
 
 ## TurboQuant CUDA KV Cache Quantization
 
-This fork adds full CUDA support for [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research; see [blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)) KV cache quantization, including custom Flash Attention kernels and a tensor-core prefill path. The result: **3.5-5x KV cache compression with quality that beats q8_0**.
+**Full CUDA support** for TurboQuant-style KV cache: custom Flash Attention paths, tensor-core-friendly prefill where applicable, and **3.5–5× KV compression** with quality competitive to **`q8_0`** in internal benchmarks (see tables below).
 
 ### What's implemented
 
