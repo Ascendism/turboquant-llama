@@ -10,10 +10,11 @@ The sections below describe **only the intentional differences** we maintain on 
 
 | Goal | Files typically involved |
 |------|---------------------------|
+| **TurboQuant-style** KV cache types (`GGML_TYPE_TURBO2_0`, **turbo3**, **turbo4**), FWHT / QJL paths, CUDA Flash Attention vec + prefill integration | `ggml/` (types, CUDA: `fattn*.cu` / `*.cuh`, quant kernels, `template-instances/fattn-vec-*turbo*`, etc.), `src/llama-graph.cpp`, KV cache sources |
 | Load certain **GGUF** layouts (e.g. rope metadata, hybrid attention) that stock loaders reject or mis-shape | `src/llama-model-loader.cpp`, `src/llama-model.cpp` |
 | Run **Qwen 3.5** / **Qwen 3.5 MoE** / **Qwen3 Next** graphs where head counts, RoPE width, and optional linear-attention tensors vary **by layer** | `src/models/qwen35.cpp`, `src/models/qwen35moe.cpp`, `src/models/qwen3next.cpp` |
 
-There are **no** fork-specific changes under **`tools/server/`** (`llama-server`) in the commits tracked here. If you use a customized server binary, that work lives outside this repository (another clone, branch, or uncommitted tree) unless you add it here.
+The large TurboQuant implementation lived on **`origin/feature/turboquant-kv-cache`** ([spiritbuun/llama-cpp-turboquant-cuda](https://github.com/spiritbuun/llama-cpp-turboquant-cuda)) and is **merged into `master` here** together with upstream llama.cpp. That branch also carried **`tools/server/`** and related tweaks; this repo may differ from stock llama.cpp in server/UI files for that reason.
 
 ---
 
@@ -82,23 +83,18 @@ Matches variable geometry per layer in Qwen 3.5 / Next hybrids so attention and 
 
 ## History and syncing
 
-- Custom work was recorded in commit **`9952377d3`** (*turboquant: snapshot before syncing upstream llama.cpp*) before merging **upstream `master`**; the current **`master`** includes that commit **plus** the merge of upstream.
-- A git tag **`backup/pre-upstream-merge-2026-04-03`** points at the pre-merge snapshot commit for easy comparison or reset.
-- To see only fork-specific file diffs against the upstream parent of that snapshot, you can use:
-  - `git show 9952377d3`
-  - or `git diff 9952377d3^..9952377d3`
+- **`9952377d3`**: Qwen/hybrid GGUF snapshot (small `src/` patch) before syncing upstream.
+- **`96f85f69c`**: merge of **`ggml-org/llama.cpp`** `master` (as of **`43a4ee4a2`**) on top of that snapshot.
+- **`origin/feature/turboquant-kv-cache`**: full TurboQuant stack (~86 commits on top of the shared merge-base with old `master`); **merged into this repo’s `master`** after the upstream sync so CUDA KV + FA paths are present again.
+- Tag **`backup/pre-upstream-merge-2026-04-03`**: points at **`9952377d3`** (Qwen-only snapshot, no TurboQuant merge).
 
-Routine maintenance: **`git fetch upstream`** then merge **`upstream/master`** (resolve conflicts, rebuild, re-test). This fork does **not** replace upstream documentation—see **[docs/build.md](build.md)** and upstream **[ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)** for build and contribution policy.
+Routine maintenance: **`git fetch upstream`** then merge **`upstream/master`** (expect conflicts in CUDA FA / KV code; re-test TurboQuant configs). See **[docs/build.md](build.md)** for build options.
 
 ---
 
-## “TurboQuant” vs what is actually in this branch
+## TurboQuant (Google Research–style KV compression)
 
-**If the name implied custom quant tech:** on current **`master`**, a full-text search of sources shows **no** identifiers, kernels, CMake flags, or docs that implement something literally called TurboQuant. The only appearance of the word is **documentation** and the snapshot **commit message** for **`9952377d3`**.
-
-**What you *do* have here:** the changes in **`9952377d3`** (now under the upstream merge) are **model loading and Qwen 3.5 / hybrid graph** fixes, not a separate quantization stack. Matrix multiply and quant types on GPU are **ordinary ggml CUDA** paths (`GGML_CUDA=ON`, MMQ / standard quants, etc.) as in **stock llama.cpp** at your merged upstream revision—not an extra “TurboQuant layer” checked into this repo.
-
-**If TurboQuant was or will be real code** (custom kernels, new block types, server flags, etc.), it either lives **outside this clone**, on **another branch not merged to `master`**, or still needs to be **added and documented here** with concrete files and build switches so this section can point to them.
+Implemented types and training references are described in the main **[README](../README.md)** (TurboQuant section). In code, look for **`GGML_TYPE_TURBO2_0`**, **`TURBO3_0`**, **`TURBO4_0`**, **`ggml_turbo_wht`**, and CUDA flash-attention paths in **`ggml/src/ggml-cuda/`**. Paper link in README: [arXiv:2501.06815](https://arxiv.org/abs/2501.06815).
 
 ---
 

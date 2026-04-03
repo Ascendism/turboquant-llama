@@ -106,11 +106,14 @@ llama_kv_cache::llama_kv_cache(
     std::map<ggml_backend_buffer_type_t, ggml_context_ptr, ggml_backend_buft_comparator> ctx_map;
 
     // create a context for each buffer type
+    const bool is_turbo = (type_k == GGML_TYPE_TURBO2_0 || type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 ||
+                           type_v == GGML_TYPE_TURBO2_0 || type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0);
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
+            const size_t n_turbo_extra = is_turbo ? 8 : 0; // rotation matrices + safety margin
             ggml_init_params params = {
-                /*.mem_size   =*/ size_t(2u*(1 + n_stream)*n_layer_kv*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t((2u*(1 + n_stream)*n_layer_kv + n_turbo_extra)*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -186,6 +189,17 @@ llama_kv_cache::llama_kv_cache(
 
         LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
 
+        // turbo types have no CPU vec_dot kernel — fall back to q8_0 for CPU-bound layers.
+        // This allows --fit on / partial offload to work: GPU layers get turbo, CPU layers get q8_0.
+        bool cpu_fallback = false;
+        if (ggml_backend_buft_is_host(buft)) {
+            const bool layer_has_turbo = (type_k == GGML_TYPE_TURBO2_0 || type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 ||
+                                          type_v == GGML_TYPE_TURBO2_0 || type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0);
+            if (layer_has_turbo) {
+                cpu_fallback = true;
+            }
+        }
+
         ggml_context * ctx = ctx_for_buft(buft);
         if (!ctx) {
             throw std::runtime_error("failed to create ggml context for kv cache");
@@ -194,8 +208,74 @@ llama_kv_cache::llama_kv_cache(
         const bool has_k = true;
         const bool has_v = !is_mla;
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+        // Layer-adaptive: use higher precision for quality-sensitive layers
+        // Config: TURBO_LAYER_ADAPTIVE env var controls the strategy
+        //   0 = uniform (default)
+        //   1 = q8_0 for first 4 + last 4
+        //   2 = q8_0 for last 8
+        //   3 = q8_0 for last 4 only
+        //   4 = q8_0 for first 4 only
+        //   5 = q8_0 for first 2 + last 2
+        //   6 = V-only q8_0 for last 8 (asymmetric: values need more precision)
+        //   7 = K-only q8_0 for last 8 (asymmetric: control experiment)
+        //   8 = V-only q8_0 for first 2 + last 2
+        //   9 = q8_0 for last 2 only
+        //  10 = K-only q8_0 for last 4
+        //  11 = q8_0 for last 6
+        ggml_type layer_type_k = type_k;
+        ggml_type layer_type_v = type_v;
+        {
+            // Thread-safe one-time init via C++ static local
+            static const int adaptive_mode = []() {
+                const char * env = getenv("TURBO_LAYER_ADAPTIVE");
+                int mode = env ? atoi(env) : 0;
+                if (mode > 0) {
+                    LLAMA_LOG_INFO("llama_kv_cache: layer-adaptive mode %d enabled\n", mode);
+                }
+                return mode;
+            }();
+            const bool is_turbo = (type_k == GGML_TYPE_TURBO2_0 || type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 ||
+                                   type_v == GGML_TYPE_TURBO2_0 || type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0);
+            const uint32_t n_layer = hparams.n_layer;
+            bool promote_k = false;
+            bool promote_v = false;
+            if (is_turbo && n_layer >= 8) {
+                switch (adaptive_mode) {
+                    case 1: promote_k = promote_v = (il < 4 || il >= n_layer - 4); break;
+                    case 2: promote_k = promote_v = (il >= n_layer - 8); break;
+                    case 3: promote_k = promote_v = (il >= n_layer - 4); break;
+                    case 4: promote_k = promote_v = (il < 4); break;
+                    case 5: promote_k = promote_v = (il < 2 || il >= n_layer - 2); break;
+                    case 6: promote_v = (il >= n_layer - 8); break;
+                    case 7: promote_k = (il >= n_layer - 8); break;
+                    case 8: promote_v = (il < 2 || il >= n_layer - 2); break;
+                    case 9: promote_k = promote_v = (il >= n_layer - 2); break;
+                    case 10: promote_k = (il >= n_layer - 4); break;
+                    case 11: promote_k = promote_v = (il >= n_layer - 6); break;
+                }
+            }
+            if (promote_k) {
+                layer_type_k = GGML_TYPE_Q8_0;
+            }
+            if (promote_v) {
+                layer_type_v = GGML_TYPE_Q8_0;
+            }
+            if (cpu_fallback) {
+                if (layer_type_k != GGML_TYPE_Q8_0) {
+                    layer_type_k = GGML_TYPE_Q8_0;
+                }
+                if (layer_type_v != GGML_TYPE_Q8_0) {
+                    layer_type_v = GGML_TYPE_Q8_0;
+                }
+                static bool warned = false;
+                if (!warned) {
+                    LLAMA_LOG_WARN("llama_kv_cache: turbo KV cache falling back to q8_0 for CPU-bound layers (partial offload)\n");
+                    warned = true;
+                }
+            }
+        }
+        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
 
         has_k && ggml_format_name(k, "cache_k_l%d", il);
         has_v && ggml_format_name(v, "cache_v_l%d", il);
@@ -211,6 +291,15 @@ llama_kv_cache::llama_kv_cache(
         map_layer_ids[il] = layers.size();
 
         layers.push_back({ il, k, v, k_stream, v_stream, });
+
+        // TurboQuant: create rotation matrix tensors (once, shared across layers)
+        if (turbo_rotation == nullptr &&
+            (type_k == GGML_TYPE_TURBO2_0 || type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0)) {
+            turbo_rotation = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 128);
+            ggml_format_name(turbo_rotation, "turbo_rotation");  // R^T
+            turbo_rotation_inv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 128);
+            ggml_format_name(turbo_rotation_inv, "turbo_rotation_inv");  // R
+        }
     }
 
     if (reuse) {
@@ -255,6 +344,20 @@ llama_kv_cache::llama_kv_cache(
         LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
 
         ggml_backend_buffer_clear(buf, 0);
+
+        // Fill turbo rotation matrices AFTER buffer clear (clear zeroes everything)
+        if (turbo_rotation != nullptr && turbo_rotation->buffer != nullptr && !model.hparams.no_alloc) {
+            #include "turbo-rotation-data.h"
+            // ggml is column-major; C arrays are row-major. Storing a row-major matrix
+            // into ggml implicitly transposes it. ggml_mul_mat(A, x) computes A^T @ x.
+            // To get R @ q: store R^T → ggml sees (R^T)^T_col = R → mul_mat gives R @ q. Wait no —
+            // store R so ggml col-major reads it as R^T, then mul_mat gives (R^T)^T = R. ✓
+            // Store R for Q forward rotation, R^T for V inverse rotation
+            // ggml_mul_mat(A,x) computes A@x for row-major stored A (verified by test)
+            ggml_backend_tensor_set(turbo_rotation, TURBO_ROTATION_R, 0, 128 * 128 * sizeof(float));
+            ggml_backend_tensor_set(turbo_rotation_inv, TURBO_ROTATION_RT, 0, 128 * 128 * sizeof(float));
+            LLAMA_LOG_INFO("%s: TurboQuant rotation matrices initialized (128x128)\n", __func__);
+        }
         ctxs_bufs.emplace_back(std::move(ctx), buf);
     }
 
@@ -323,6 +426,13 @@ void llama_kv_cache::clear(bool data) {
     if (data) {
         for (auto & [_, buf] : ctxs_bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
+        }
+
+        // Re-initialize turbo rotation matrices after buffer clear (clear zeroes everything)
+        if (turbo_rotation != nullptr && turbo_rotation->buffer != nullptr) {
+            #include "turbo-rotation-data.h"
+            ggml_backend_tensor_set(turbo_rotation, TURBO_ROTATION_R, 0, 128 * 128 * sizeof(float));
+            ggml_backend_tensor_set(turbo_rotation_inv, TURBO_ROTATION_RT, 0, 128 * 128 * sizeof(float));
         }
     }
 }
@@ -2437,6 +2547,22 @@ ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) cons
 
 ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) const {
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rotation() const {
+    return kv->get_turbo_rotation();
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rotation_inv() const {
+    return kv->get_turbo_rotation_inv();
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rot_forward() const {
+    return kv->get_turbo_rotation();
+}
+
+ggml_tensor * llama_kv_cache_context::get_turbo_rot_inverse() const {
+    return kv->get_turbo_rotation_inv();
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {

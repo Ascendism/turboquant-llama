@@ -75,17 +75,17 @@ static __global__ void flash_attn_ext_vec(
 #endif // GGML_USE_HIP
 
     constexpr int nthreads    = ggml_cuda_fattn_vec_get_nthreads_device();
-    constexpr int nthreads_KQ = (type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16) ? 128 / cpy_nb : nthreads_KQ_q;
-    constexpr int nthreads_V  = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16) ? 128 / cpy_nb : nthreads_V_q;
+    constexpr int nthreads_KQ = (type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 || type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0) ? 128 / cpy_nb : nthreads_KQ_q;
+    constexpr int nthreads_V  = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0) ? 128 / cpy_nb : nthreads_V_q;
 
     static_assert(WARP_SIZE % nthreads_KQ == 0, "bad nthreads_K");
     static_assert(WARP_SIZE % nthreads_V  == 0, "bad nthreads_V");
 
-    constexpr int V_rows_per_thread = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16) ? 2*cpy_ne : 4;
+    constexpr int V_rows_per_thread = (type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16 || type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0) ? 2*cpy_ne : 4;
     constexpr int V_cols_per_iter   = WARP_SIZE / nthreads_V;
 
     constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<type_K, D, nthreads_KQ>();
-    constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16 && type_K != GGML_TYPE_BF16;
+    constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16 && type_K != GGML_TYPE_BF16 && type_K != GGML_TYPE_TURBO2_0 && type_K != GGML_TYPE_TURBO3_0 && type_K != GGML_TYPE_TURBO4_0;
 #ifdef V_DOT2_F32_F16_AVAILABLE
     constexpr dequantize_V_t dequantize_V = get_dequantize_V<type_V, half,  V_rows_per_thread>();
 #else
@@ -119,6 +119,13 @@ static __global__ void flash_attn_ext_vec(
     float2           VKQ[ncols][(D/2)/nthreads_V] = {{{0.0f, 0.0f}}};
     __shared__ float  KQ[ne_KQ > ne_combine ? ne_KQ : ne_combine];
 #endif // V_DOT2_F32_F16_AVAILABLE
+
+    // Sparse V threshold: skip V dequant for negligible attention weights.
+    // Positions with exp(score - max) below this contribute noise, not signal.
+    constexpr float sparse_v_threshold_f = 1e-6f;
+#ifdef V_DOT2_F32_F16_AVAILABLE
+    const     half  sparse_v_threshold_h = __float2half(sparse_v_threshold_f);
+#endif
 
     float KQ_max[ncols];
     float KQ_sum[ncols];
@@ -236,6 +243,10 @@ static __global__ void flash_attn_ext_vec(
 #endif // V_DOT2_F32_F16_AVAILABLE
     }
 
+    // Q pre-rotation for turbo types is now handled externally in ggml_cuda_flash_attn_ext
+    // (k_turbo_fwht_forward kernel), before the vec kernel launch. This reduces register
+    // pressure and eliminates 22 syncthreads per decode token (D=256).
+
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     K     += blockIdx.y*nthreads * nb11;
     V     += blockIdx.y*nthreads * nb21;
@@ -320,6 +331,17 @@ static __global__ void flash_attn_ext_vec(
             for (int j = 0; j < ncols; ++j) {
                 KQ_k[j] = __half2half2(KQ[j*nthreads + k]);
             }
+
+            // Sparse V: skip V dequant for negligible attention weights (TheTom, sparse-v-dequant)
+            {
+                bool dominated = true;
+#pragma unroll
+                for (int j = 0; j < ncols; ++j) {
+                    if (__hgt(__low2half(KQ_k[j]), sparse_v_threshold_h)) { dominated = false; break; }
+                }
+                if (dominated) { continue; }
+            }
+
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 half2 tmp[V_rows_per_thread/2];
@@ -349,6 +371,17 @@ static __global__ void flash_attn_ext_vec(
             for (int j = 0; j < ncols; ++j) {
                 KQ_k[j] = KQ[j*nthreads + k];
             }
+
+            // Sparse V: skip V dequant for negligible attention weights (TheTom, sparse-v-dequant)
+            {
+                bool dominated = true;
+#pragma unroll
+                for (int j = 0; j < ncols; ++j) {
+                    if (KQ_k[j] >= sparse_v_threshold_f) { dominated = false; break; }
+                }
+                if (dominated) { continue; }
+            }
+
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 float2 tmp[V_rows_per_thread/2];
@@ -574,6 +607,9 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q5_1); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q8_0); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_BF16); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_TURBO2_0); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_TURBO3_0); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_TURBO4_0); \
 
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_F16)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q4_0)
@@ -598,3 +634,15 @@ EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q8_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_BF16)
+
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_TURBO2_0)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_TURBO2_0)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_TURBO2_0)
+
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_TURBO3_0)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_TURBO3_0)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_TURBO3_0)
+
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_TURBO4_0)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_TURBO4_0)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_TURBO4_0)
