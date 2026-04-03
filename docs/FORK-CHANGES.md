@@ -92,9 +92,13 @@ Routine maintenance: **`git fetch upstream`** then merge **`upstream/master`** (
 
 ---
 
-## Relationship to “TurboQuant” / CUDA
+## “TurboQuant” vs what is actually in this branch
 
-This repository name reflects **CUDA** builds (`GGML_CUDA=ON`, etc.) as in upstream. The word **TurboQuant** in commit messages is a **project label** for this fork; there is no separate `TurboQuant` symbol layer in the source. Quantization behavior follows **stock ggml / llama.cpp** unless you apply additional patches elsewhere.
+**If the name implied custom quant tech:** on current **`master`**, a full-text search of sources shows **no** identifiers, kernels, CMake flags, or docs that implement something literally called TurboQuant. The only appearance of the word is **documentation** and the snapshot **commit message** for **`9952377d3`**.
+
+**What you *do* have here:** the changes in **`9952377d3`** (now under the upstream merge) are **model loading and Qwen 3.5 / hybrid graph** fixes, not a separate quantization stack. Matrix multiply and quant types on GPU are **ordinary ggml CUDA** paths (`GGML_CUDA=ON`, MMQ / standard quants, etc.) as in **stock llama.cpp** at your merged upstream revision—not an extra “TurboQuant layer” checked into this repo.
+
+**If TurboQuant was or will be real code** (custom kernels, new block types, server flags, etc.), it either lives **outside this clone**, on **another branch not merged to `master`**, or still needs to be **added and documented here** with concrete files and build switches so this section can point to them.
 
 ---
 
