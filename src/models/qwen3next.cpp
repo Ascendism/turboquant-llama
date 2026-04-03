@@ -103,8 +103,11 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
         ggml_tensor *             cur,
         ggml_tensor *             inp_pos,
         int                       il) {
-    const int64_t n_embd_head = hparams.n_embd_head_v();
-    GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
+    const int64_t n_embd_head  = hparams.n_embd_head_v(il);
+    const int64_t n_head_il    = hparams.n_head(il);
+    const int64_t n_head_kv_il = hparams.n_head_kv(il);
+    const int64_t n_rot_il     = hparams.n_rot(il);
+    GGML_ASSERT(n_embd_head == hparams.n_embd_head_k(il));
 
     // Order: joint QG projection, QG split, Q norm, KV projection, K norm, RoPE, attention
 
@@ -112,16 +115,16 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
     ggml_tensor * Qcur_full = build_lora_mm(model.layers[il].wq, cur);
     cb(Qcur_full, "Qcur_full", il);
 
-    Qcur_full = ggml_reshape_4d(ctx0, Qcur_full, n_embd_head * 2, n_head, n_tokens, 1);
+    Qcur_full = ggml_reshape_4d(ctx0, Qcur_full, n_embd_head * 2, n_head_il, n_tokens, 1);
 
     // Split Q projection into query and gate
     // The split should be along dimension 0 (the feature dimension)
-    ggml_tensor * Qcur = ggml_view_4d(ctx0, Qcur_full, n_embd_head, n_head, n_tokens, 1,
+    ggml_tensor * Qcur = ggml_view_4d(ctx0, Qcur_full, n_embd_head, n_head_il, n_tokens, 1,
                                             Qcur_full->nb[1], Qcur_full->nb[2], Qcur_full->nb[3], 0);
     cb(Qcur, "Qcur_view", il);
 
     ggml_tensor * gate =
-        ggml_view_4d(ctx0, Qcur_full, n_embd_head, n_head, n_tokens, 1,
+        ggml_view_4d(ctx0, Qcur_full, n_embd_head, n_head_il, n_tokens, 1,
                      Qcur_full->nb[1], Qcur_full->nb[2], Qcur_full->nb[3], n_embd_head * ggml_element_size(Qcur_full));
     cb(gate, "gate", il);
 
@@ -131,8 +134,8 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
     ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
     cb(Vcur, "Vcur", il);
 
-    Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
-    Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
+    Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv_il, n_tokens);
+    Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv_il, n_tokens);
 
     Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
     cb(Qcur, "Qcur_normed", il);
@@ -142,12 +145,12 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
 
     Qcur = ggml_rope_ext(
             ctx0, Qcur, inp_pos, nullptr,
-            n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+            n_rot_il, rope_type, n_ctx_orig, freq_base, freq_scale,
             ext_factor, attn_factor, beta_fast, beta_slow);
 
     Kcur = ggml_rope_ext(
             ctx0, Kcur, inp_pos, nullptr,
-            n_rot, rope_type, n_ctx_orig, freq_base,
+            n_rot_il, rope_type, n_ctx_orig, freq_base,
             freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
 
     cb(Qcur, "Qcur", il);
@@ -162,12 +165,12 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
     cb(cur, "attn_pregate", il);
 
     // TODO: CUDA is missing non-contiguous unary ops. when implemented: remove this cont
-    gate = ggml_cont_2d(ctx0, gate, n_embd_head * n_head, n_tokens);
+    gate = ggml_cont_2d(ctx0, gate, n_embd_head * n_head_il, n_tokens);
 
     gate = ggml_sigmoid(ctx0, gate);
     cb(gate, "gate_sigmoid", il);
 
-    gate = ggml_reshape_2d(ctx0, gate, n_embd_head * n_head, n_tokens);
+    gate = ggml_reshape_2d(ctx0, gate, n_embd_head * n_head_il, n_tokens);
 
     cur = ggml_mul(ctx0, cur, gate);
     cb(cur, "attn_gated", il);
@@ -314,7 +317,9 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn_linear(
     // Reshape a to merge head dimensions: [batch, seq_len, num_k_heads, num_v_heads/num_k_heads] -> [batch, seq_len, num_v_heads]
     ggml_tensor * alpha = ggml_cont_3d(ctx0, a, num_v_heads, n_seq_tokens, n_seqs);
 
-    ggml_tensor * alpha_biased   = ggml_add(ctx0, alpha, model.layers[il].ssm_dt);
+    ggml_tensor * alpha_biased = model.layers[il].ssm_dt
+        ? ggml_add(ctx0, alpha, model.layers[il].ssm_dt)
+        : alpha;
     ggml_tensor * alpha_softplus = ggml_softplus(ctx0, alpha_biased);
     cb(alpha_softplus, "a_softplus", il);
 
