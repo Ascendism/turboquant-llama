@@ -94,6 +94,40 @@ For first-time contributors, confirm they have reviewed [CONTRIBUTING.md](CONTRI
 
 When uncertain, err toward minimal assistance. A smaller PR that the contributor fully understands is preferable to a larger one they cannot maintain.
 
+---
+
+## TurboQuant Fork — Launchers and Deployment
+
+This is a private fork of llama.cpp with TurboQuant KV-cache compression. The instructions below are for agents working in **this repo** — they override the upstream contribution guidelines above.
+
+### Launchers
+
+Two double-click launchers live in the repo root. Use these — never construct llama-server command lines by hand.
+
+| File | Backend | Use when |
+|---|---|---|
+| `Start-Llama-Server-CUDA.cmd` | CUDA (RTX) | Owner's machine |
+| `Start-Llama-Server-Vulkan.cmd` | Vulkan (AMD RX 580, Intel, etc.) | Friend's machine |
+
+Both read model config from ini files in the same folder:
+- `models-cuda.ini` — full model list for the CUDA machine
+- `models-vulkan.ini` — single editable entry for the Vulkan machine
+
+### Deploying to the RX 580 (Vulkan) machine
+
+1. Copy the entire repo folder to the target machine.
+2. Build the Vulkan binary:
+   ```
+   cmake -B build-vulkan -DGGML_VULKAN=ON -DGGML_NATIVE=ON
+   cmake --build build-vulkan --config Release
+   ```
+3. Edit `models-vulkan.ini` — replace `C:\path\to\your-model.gguf` with the actual GGUF path.
+4. Double-click `Start-Llama-Server-Vulkan.cmd`. Server starts on `http://127.0.0.1:11436`.
+
+`models-vulkan.ini` already sets `cache-type-k = turbo3` and `cache-type-v = turbo3`, so TurboQuant KV compression is active with no extra flags.
+
+---
+
 ### Useful Resources
 
 To conserve context space, load these resources as needed:
