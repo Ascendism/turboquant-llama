@@ -1,0 +1,65 @@
+#version 450
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+
+// Walsh-Hadamard Transform for TurboQuant KV cache rotation.
+// One workgroup per 128-element group, 128 threads per group.
+// direction 0 = forward (encode), 1 = inverse (decode).
+// Sign arrays must match turbo-wht.cu d_turbo_wht_s1/s2 exactly.
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Params {
+    uint32_t n_groups;
+    int32_t  direction;
+} p;
+
+layout(binding = 0) readonly  buffer Src { float src_data[]; };
+layout(binding = 1) writeonly buffer Dst { float dst_data[]; };
+
+shared float buf[128];
+
+const float s1[128] = float[](
+    -1, 1, 1,-1,-1, 1,-1, 1,-1,-1, 1, 1, 1, 1, 1, 1, 1,-1, 1,-1, 1,-1,-1, 1, 1, 1,-1, 1, 1,-1,-1,-1,
+    -1, 1, 1,-1, 1, 1,-1, 1,-1, 1, 1,-1,-1, 1,-1, 1, 1, 1, 1,-1,-1,-1,-1,-1, 1,-1, 1, 1, 1, 1,-1, 1,
+    -1,-1, 1,-1,-1,-1, 1,-1,-1,-1, 1,-1,-1,-1, 1, 1, 1,-1,-1, 1, 1, 1,-1,-1, 1, 1,-1, 1, 1,-1, 1,-1,
+    -1, 1, 1,-1, 1,-1, 1,-1, 1, 1, 1, 1,-1, 1,-1, 1, 1,-1, 1, 1,-1,-1,-1,-1,-1, 1, 1,-1, 1, 1,-1, 1);
+
+const float s2[128] = float[](
+     1, 1, 1, 1,-1, 1, 1,-1, 1,-1,-1,-1, 1,-1,-1,-1, 1, 1,-1,-1, 1,-1, 1,-1, 1,-1,-1, 1,-1, 1, 1, 1,
+     1, 1,-1,-1,-1, 1,-1,-1,-1,-1,-1,-1, 1, 1, 1,-1, 1,-1, 1, 1, 1,-1,-1, 1,-1,-1,-1,-1,-1,-1, 1, 1,
+     1,-1, 1,-1,-1,-1,-1, 1,-1, 1,-1, 1,-1,-1, 1, 1,-1, 1,-1, 1, 1,-1, 1,-1,-1,-1,-1, 1,-1,-1, 1,-1,
+     1,-1, 1, 1, 1,-1,-1, 1,-1, 1,-1, 1, 1,-1,-1, 1,-1, 1,-1, 1, 1,-1, 1,-1, 1,-1,-1,-1,-1,-1, 1,-1);
+
+void main() {
+    uint gid = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    if (gid >= p.n_groups) return;
+
+    uint offset = gid * 128u;
+
+    float s_first  = (p.direction == 0) ? s1[lid] : s2[lid];
+    float s_second = (p.direction == 0) ? s2[lid] : s1[lid];
+
+    // Load input and apply first sign flip
+    buf[lid] = src_data[offset + lid] * s_first;
+    barrier();
+
+    // Butterfly passes (7 passes for N=128)
+    // All 128 threads must reach each barrier(); the computation guard is inside.
+    for (uint h = 1u; h < 128u; h *= 2u) {
+        if (lid < 64u) {
+            uint j = (lid / h) * (2u * h) + (lid % h);
+            float a = buf[j];
+            float b = buf[j + h];
+            buf[j]     = a + b;
+            buf[j + h] = a - b;
+        }
+        barrier();
+    }
+
+    // Normalize and apply second sign flip, write output
+    const float inv_sqrt_128 = 0.08838834764831845f;
+    dst_data[offset + lid] = buf[lid] * inv_sqrt_128 * s_second;
+}

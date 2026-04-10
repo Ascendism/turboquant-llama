@@ -247,6 +247,174 @@ FLOAT_TYPEV4 dequantize4(uint ib, uint iqs, uint a_offset, uint binding_idx) {
 }
 #endif
 
+// ============================================================
+// TurboQuant dequantize4 implementations
+// Byte access via raw uint[] buffers declared in types.glsl.
+// ============================================================
+
+#if defined(DATA_A_TURBO3_0)
+// block_turbo3_0: 32 values, 14 bytes
+//   bytes 0-1: float16 norm
+//   bytes 2-9: qs[8]    lower 2 bits of 3-bit index, 4 per byte
+//   bytes 10-13: signs[4] upper 1 bit of index, 8 per byte
+#define BLOCK_BYTE_SIZE 14
+
+const float CENTROIDS_3BIT[8] = float[](
+    -0.190685, -0.117832, -0.065717, -0.021460,
+     0.021460,  0.065717,  0.117832,  0.190685);
+
+uint turbo3_byte_k(uint byte_abs) {
+    return (k_turbo3_raw[byte_abs >> 2u] >> ((byte_abs & 3u) << 3u)) & 0xFFu;
+}
+uint turbo3_byte_v(uint byte_abs) {
+    return (v_turbo3_raw[byte_abs >> 2u] >> ((byte_abs & 3u) << 3u)) & 0xFFu;
+}
+
+FLOAT_TYPEV4 dequantize4(uint ib, uint iqs, uint a_offset, uint binding_idx) {
+    // bi = absolute block index; block starts at byte bi*14
+    uint bi = a_offset + ib;
+    uint base = bi * 14u;
+
+    // Extract fp16 norm from bytes 0-1 of the block
+    uint nb0, nb1;
+    if (binding_idx == BINDING_IDX_K) {
+        nb0 = turbo3_byte_k(base);
+        nb1 = turbo3_byte_k(base + 1u);
+    } else {
+        nb0 = turbo3_byte_v(base);
+        nb1 = turbo3_byte_v(base + 1u);
+    }
+    float norm = unpackHalf2x16(nb0 | (nb1 << 8u)).x;
+
+    // iqs is always a multiple of 4; all 4 elements share one qs byte and one signs byte
+    // qs byte is at block offset 2 + iqs/4; signs byte at block offset 10 + iqs/8
+    uint qs_off    = base + 2u + iqs / 4u;
+    uint signs_off = base + 10u + iqs / 8u;
+    uint qs_byte, signs_byte;
+    if (binding_idx == BINDING_IDX_K) {
+        qs_byte    = turbo3_byte_k(qs_off);
+        signs_byte = turbo3_byte_k(signs_off);
+    } else {
+        qs_byte    = turbo3_byte_v(qs_off);
+        signs_byte = turbo3_byte_v(signs_off);
+    }
+
+    // iqs%8 is the bit offset in the signs byte for element iqs
+    uint sign_shift = iqs & 7u;
+
+    float r0 = norm * CENTROIDS_3BIT[( qs_byte        & 0x3u) | (((signs_byte >> (sign_shift + 0u)) & 1u) << 2u)];
+    float r1 = norm * CENTROIDS_3BIT[((qs_byte >> 2u) & 0x3u) | (((signs_byte >> (sign_shift + 1u)) & 1u) << 2u)];
+    float r2 = norm * CENTROIDS_3BIT[((qs_byte >> 4u) & 0x3u) | (((signs_byte >> (sign_shift + 2u)) & 1u) << 2u)];
+    float r3 = norm * CENTROIDS_3BIT[((qs_byte >> 6u) & 0x3u) | (((signs_byte >> (sign_shift + 3u)) & 1u) << 2u)];
+
+    return FLOAT_TYPEV4(r0, r1, r2, r3);
+}
+#endif // DATA_A_TURBO3_0
+
+#if defined(DATA_A_TURBO2_0)
+// block_turbo2_0: 32 values, 10 bytes
+//   bytes 0-1: float16 norm
+//   bytes 2-9: qs[8]  2-bit indices, 4 per byte
+#define BLOCK_BYTE_SIZE 10
+
+const float CENTROIDS_2BIT[4] = float[](-0.133462, -0.039994, 0.039994, 0.133462);
+
+uint turbo2_byte_k(uint byte_abs) {
+    return (k_turbo2_raw[byte_abs >> 2u] >> ((byte_abs & 3u) << 3u)) & 0xFFu;
+}
+uint turbo2_byte_v(uint byte_abs) {
+    return (v_turbo2_raw[byte_abs >> 2u] >> ((byte_abs & 3u) << 3u)) & 0xFFu;
+}
+
+FLOAT_TYPEV4 dequantize4(uint ib, uint iqs, uint a_offset, uint binding_idx) {
+    uint bi = a_offset + ib;
+    uint base = bi * 10u;
+
+    uint nb0, nb1;
+    if (binding_idx == BINDING_IDX_K) {
+        nb0 = turbo2_byte_k(base);
+        nb1 = turbo2_byte_k(base + 1u);
+    } else {
+        nb0 = turbo2_byte_v(base);
+        nb1 = turbo2_byte_v(base + 1u);
+    }
+    float norm = unpackHalf2x16(nb0 | (nb1 << 8u)).x;
+
+    // iqs always divisible by 4; all 4 elements in one qs byte
+    uint qs_off = base + 2u + iqs / 4u;
+    uint qs_byte;
+    if (binding_idx == BINDING_IDX_K) {
+        qs_byte = turbo2_byte_k(qs_off);
+    } else {
+        qs_byte = turbo2_byte_v(qs_off);
+    }
+
+    float r0 = norm * CENTROIDS_2BIT[ qs_byte        & 0x3u];
+    float r1 = norm * CENTROIDS_2BIT[(qs_byte >> 2u) & 0x3u];
+    float r2 = norm * CENTROIDS_2BIT[(qs_byte >> 4u) & 0x3u];
+    float r3 = norm * CENTROIDS_2BIT[(qs_byte >> 6u) & 0x3u];
+
+    return FLOAT_TYPEV4(r0, r1, r2, r3);
+}
+#endif // DATA_A_TURBO2_0
+
+#if defined(DATA_A_TURBO4_0)
+// block_turbo4_0: 128 values, 66 bytes
+//   bytes 0-1: float16 norm
+//   bytes 2-65: qs[64]  4-bit indices, 2 per byte (low nibble first)
+#define BLOCK_BYTE_SIZE 66
+
+const float CENTROIDS_4BIT[16] = float[](
+    -0.241556, -0.182907, -0.143047, -0.111065,
+    -0.083317, -0.058069, -0.034311, -0.011353,
+     0.011353,  0.034311,  0.058069,  0.083317,
+     0.111065,  0.143047,  0.182907,  0.241556);
+
+uint turbo4_byte_k(uint byte_abs) {
+    return (k_turbo4_raw[byte_abs >> 2u] >> ((byte_abs & 3u) << 3u)) & 0xFFu;
+}
+uint turbo4_byte_v(uint byte_abs) {
+    return (v_turbo4_raw[byte_abs >> 2u] >> ((byte_abs & 3u) << 3u)) & 0xFFu;
+}
+
+FLOAT_TYPEV4 dequantize4(uint ib, uint iqs, uint a_offset, uint binding_idx) {
+    uint bi = a_offset + ib;
+    uint base = bi * 66u;
+
+    uint nb0, nb1;
+    if (binding_idx == BINDING_IDX_K) {
+        nb0 = turbo4_byte_k(base);
+        nb1 = turbo4_byte_k(base + 1u);
+    } else {
+        nb0 = turbo4_byte_v(base);
+        nb1 = turbo4_byte_v(base + 1u);
+    }
+    float norm = unpackHalf2x16(nb0 | (nb1 << 8u)).x;
+
+    // iqs always divisible by 4; elements iqs+0,1 in one qs byte, iqs+2,3 in next
+    // qs byte for element i is at block offset 2 + i/2
+    uint qs0_off = base + 2u + iqs / 2u;
+    uint qs1_off = qs0_off + 1u;
+    uint qs0, qs1;
+    if (binding_idx == BINDING_IDX_K) {
+        qs0 = turbo4_byte_k(qs0_off);
+        qs1 = turbo4_byte_k(qs1_off);
+    } else {
+        qs0 = turbo4_byte_v(qs0_off);
+        qs1 = turbo4_byte_v(qs1_off);
+    }
+
+    float r0 = norm * CENTROIDS_4BIT[ qs0        & 0xFu];
+    float r1 = norm * CENTROIDS_4BIT[(qs0 >> 4u) & 0xFu];
+    float r2 = norm * CENTROIDS_4BIT[ qs1        & 0xFu];
+    float r3 = norm * CENTROIDS_4BIT[(qs1 >> 4u) & 0xFu];
+
+    return FLOAT_TYPEV4(r0, r1, r2, r3);
+}
+#endif // DATA_A_TURBO4_0
+
+// ============================================================
+
 #define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
 
 

@@ -845,6 +845,7 @@ struct vk_device_struct {
     std::map<std::pair<uint32_t, uint32_t>, vk_pipeline> pipeline_fa_mask_opt;
 
     vk_pipeline pipeline_flash_attn_split_k_reduce;
+    vk_pipeline pipeline_turbo_wht;
     vk_pipeline pipeline_count_experts;
 
     // [2] is for whether to take n_experts from spec constant (0) or push constant (1)
@@ -1594,6 +1595,11 @@ template <> void init_pushconst_fastdiv(vk_op_sum_rows_push_constants &p) {
 struct vk_quantize_q8_1_push_constants {
     uint32_t ne;
     uint32_t num_blocks;
+};
+
+struct vk_op_turbo_wht_push_constants {
+    uint32_t n_groups;
+    int32_t  direction;
 };
 
 struct vk_op_flash_attn_split_k_reduce_push_constants {
@@ -3451,6 +3457,9 @@ static void ggml_vk_load_shaders(vk_device& device) {
         CREATE_FA(GGML_TYPE_Q5_0, q5_0, FA_SCALAR, )
         CREATE_FA(GGML_TYPE_Q5_1, q5_1, FA_SCALAR, )
         CREATE_FA(GGML_TYPE_IQ4_NL, iq4_nl, FA_SCALAR, )
+        CREATE_FA(GGML_TYPE_TURBO3_0, turbo3_0, FA_SCALAR, )
+        CREATE_FA(GGML_TYPE_TURBO4_0, turbo4_0, FA_SCALAR, )
+        CREATE_FA(GGML_TYPE_TURBO2_0, turbo2_0, FA_SCALAR, )
     } else {
         CREATE_FA(GGML_TYPE_F32, f32, FA_SCALAR, _fp32)
         CREATE_FA(GGML_TYPE_F16, f16, FA_SCALAR, _fp32)
@@ -3460,6 +3469,9 @@ static void ggml_vk_load_shaders(vk_device& device) {
         CREATE_FA(GGML_TYPE_Q5_0, q5_0, FA_SCALAR, _fp32)
         CREATE_FA(GGML_TYPE_Q5_1, q5_1, FA_SCALAR, _fp32)
         CREATE_FA(GGML_TYPE_IQ4_NL, iq4_nl, FA_SCALAR, _fp32)
+        CREATE_FA(GGML_TYPE_TURBO3_0, turbo3_0, FA_SCALAR, _fp32)
+        CREATE_FA(GGML_TYPE_TURBO4_0, turbo4_0, FA_SCALAR, _fp32)
+        CREATE_FA(GGML_TYPE_TURBO2_0, turbo2_0, FA_SCALAR, _fp32)
     }
 #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
     if (device->coopmat1_fa_support) {
@@ -4269,6 +4281,9 @@ static void ggml_vk_load_shaders(vk_device& device) {
 
     ggml_vk_create_pipeline(device, device->pipeline_matmul_split_k_reduce, "split_k_reduce", split_k_reduce_len, split_k_reduce_data, "main", 2, 2 * sizeof(uint32_t), {256 * 4, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_flash_attn_split_k_reduce, "fa_split_k_reduce", fa_split_k_reduce_len, fa_split_k_reduce_data, "main", 3, sizeof(vk_op_flash_attn_split_k_reduce_push_constants), {1, device->subgroup_size, 1}, {device->subgroup_size}, 1, true);
+
+    // TurboQuant WHT rotation: 128 threads per group, 2 bindings (src, dst)
+    ggml_vk_create_pipeline(device, device->pipeline_turbo_wht, "turbo_wht", turbo_wht_len, turbo_wht_data, "main", 2, sizeof(vk_op_turbo_wht_push_constants), {128, 1, 1}, {}, 1);
 
     for (auto &it : device->pipeline_fa_mask_opt) {
         auto BrBc = it.first;
@@ -8851,6 +8866,28 @@ static bool ggml_vk_flash_attn_coopmat_shmem_support(const vk_device& device, co
     return supported;
 }
 
+static void ggml_vk_turbo_wht(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * dst) {
+    const ggml_tensor * src = dst->src[0];
+    GGML_ASSERT(src->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    int32_t direction;
+    memcpy(&direction, dst->op_params, sizeof(int32_t));
+
+    const uint64_t n_elements = (uint64_t)ggml_nelements(src);
+    GGML_ASSERT(n_elements % 128 == 0);
+    const uint32_t n_groups = (uint32_t)(n_elements / 128);
+
+    const vk_op_turbo_wht_push_constants pc = { n_groups, direction };
+
+    vk_subbuffer src_buf = ggml_vk_tensor_subbuffer(ctx, src);
+    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst);
+
+    ggml_pipeline_request_descriptor_sets(ctx, ctx->device->pipeline_turbo_wht, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, ctx->device->pipeline_turbo_wht,
+        { src_buf, dst_buf }, pc, { n_groups, 1, 1 });
+}
+
 static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v, const ggml_tensor * mask, const ggml_tensor * sinks, ggml_tensor * dst) {
     VK_LOG_DEBUG("ggml_vk_flash_attn((" << q << ", name=" << q->name << ", type=" << q->type << ", ne0=" << q->ne[0] << ", ne1=" << q->ne[1] << ", ne2=" << q->ne[2] << ", ne3=" << q->ne[3] << ", nb0=" << q->nb[0] << ", nb1=" << q->nb[1] << ", nb2=" << q->nb[2] << ", nb3=" << q->nb[3];
     std::cerr << "), (" << k << ", name=" << k->name << ", type=" << k->type << ", ne0=" << k->ne[0] << ", ne1=" << k->ne[1] << ", ne2=" << k->ne[2] << ", ne3=" << k->ne[3] << ", nb0=" << k->nb[0] << ", nb1=" << k->nb[1] << ", nb2=" << k->nb[2] << ", nb3=" << k->nb[3];
@@ -13233,6 +13270,11 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
 
         break;
 
+    case GGML_OP_TURBO_WHT:
+        ggml_vk_turbo_wht(ctx, compute_ctx, node);
+
+        break;
+
     case GGML_OP_RWKV_WKV6:
         ggml_vk_rwkv_wkv6(ctx, compute_ctx, node);
 
@@ -15382,6 +15424,11 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 case GGML_TYPE_IQ4_NL:
                     // supported in scalar and coopmat2 paths
                     break;
+                case GGML_TYPE_TURBO3_0:
+                case GGML_TYPE_TURBO4_0:
+                case GGML_TYPE_TURBO2_0:
+                    // TurboQuant KV-cache types: FA_SCALAR path only
+                    break;
                 // K dequants currently disabled because D dimension is rounded up to 256 and runs inefficiently
                 //case GGML_TYPE_Q2_K:
                 //case GGML_TYPE_Q3_K:
@@ -15406,6 +15453,8 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 }
                 return true;
             }
+        case GGML_OP_TURBO_WHT:
+            return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
         case GGML_OP_GET_ROWS:
             {
                 switch (op->src[0]->type) {

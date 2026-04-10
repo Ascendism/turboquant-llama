@@ -1782,6 +1782,48 @@ float e8m0_to_fp32(uint8_t x) {
     return uintBitsToFloat(bits);
 }
 
+// ============================================================
+// TurboQuant KV-cache types (turbo2, turbo3, turbo4)
+// Block layouts match ggml-common.h exactly.
+// Raw uint[] buffers used for byte access (no uint8_t needed).
+// ============================================================
+
+// turbo3: 32 values, 14 bytes per block
+//   float16_t norm  (bytes 0-1)
+//   uint8_t   qs[8] (bytes 2-9)  lower 2 bits of 3-bit index, 4 per byte
+//   uint8_t signs[4] (bytes 10-13) upper 1 bit, 8 per byte
+#define QUANT_K_TURBO3_0 32
+
+#if defined(DATA_A_TURBO3_0)
+#define QUANT_K QUANT_K_TURBO3_0
+layout(binding = 1) readonly buffer K_TURBO3 { uint k_turbo3_raw[]; };
+layout(binding = 2) readonly buffer V_TURBO3 { uint v_turbo3_raw[]; };
+#endif
+
+// turbo2: 32 values, 10 bytes per block
+//   float16_t norm  (bytes 0-1)
+//   uint8_t   qs[8] (bytes 2-9)  2-bit indices, 4 per byte
+#define QUANT_K_TURBO2_0 32
+
+#if defined(DATA_A_TURBO2_0)
+#define QUANT_K QUANT_K_TURBO2_0
+layout(binding = 1) readonly buffer K_TURBO2 { uint k_turbo2_raw[]; };
+layout(binding = 2) readonly buffer V_TURBO2 { uint v_turbo2_raw[]; };
+#endif
+
+// turbo4: 128 values, 66 bytes per block
+//   float16_t norm   (bytes 0-1)
+//   uint8_t   qs[64] (bytes 2-65) 4-bit indices, 2 per byte (low nibble first)
+#define QUANT_K_TURBO4_0 128
+
+#if defined(DATA_A_TURBO4_0)
+#define QUANT_K QUANT_K_TURBO4_0
+layout(binding = 1) readonly buffer K_TURBO4 { uint k_turbo4_raw[]; };
+layout(binding = 2) readonly buffer V_TURBO4 { uint v_turbo4_raw[]; };
+#endif
+
+// ============================================================
+
 #if BDA
 
 #extension GL_EXT_buffer_reference : enable
