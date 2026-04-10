@@ -673,13 +673,15 @@ void process_shaders() {
                     string_to_spv("flash_attn_f32_f16_" + tname, "flash_attn.comp",
                         merge_maps(fa_base_dict, {{data_a_key, "1"}, {"Q_TYPE", "float"}, {"D_TYPE", "float"}, {"D_TYPEV4", "vec4"}, {"BLOCK_SIZE", "QUANT_K_"+to_uppercase(tname) }}), fp16, false, false, f16acc);
                 }
-                // TurboQuant KV-cache types: FA_SCALAR only (no coopmat needed)
-                for (const auto& turbo_t : {"turbo3_0", "turbo4_0", "turbo2_0"}) {
-                    std::string data_a_key = std::string("DATA_A_") + to_uppercase(turbo_t);
-                    std::string quant_k    = std::string("QUANT_K_") + to_uppercase(turbo_t);
-                    string_to_spv("flash_attn_f32_f16_" + std::string(turbo_t), "flash_attn.comp",
-                        merge_maps(fa_base_dict, {{data_a_key, "1"}, {"Q_TYPE", "float"}, {"D_TYPE", "float"}, {"D_TYPEV4", "vec4"}, {"BLOCK_SIZE", quant_k}}), fp16, false, false, f16acc);
-                }
+            }
+
+            // TurboQuant KV-cache types: FA_SCALAR only, outside the tname loop to avoid
+            // duplicate shader_fnames entries (which would cause duplicate extern declarations).
+            for (const auto& turbo_t : {"turbo3_0", "turbo4_0", "turbo2_0"}) {
+                std::string data_a_key = std::string("DATA_A_") + to_uppercase(turbo_t);
+                std::string quant_k    = std::string("QUANT_K_") + to_uppercase(turbo_t);
+                string_to_spv("flash_attn_f32_f16_" + std::string(turbo_t), "flash_attn.comp",
+                    merge_maps(fa_base_dict, {{data_a_key, "1"}, {"Q_TYPE", "float"}, {"D_TYPE", "float"}, {"D_TYPEV4", "vec4"}, {"BLOCK_SIZE", quant_k}}), fp16, false, false, f16acc);
             }
         }
     }
