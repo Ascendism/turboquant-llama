@@ -3010,6 +3010,11 @@ static vk_fa_tuning_params get_fa_tuning_params(const vk_device& device, uint32_
         path = FA_SCALAR;
     }
 
+    // TurboQuant types only have FA_SCALAR shaders compiled; force scalar path.
+    if (kv_type == GGML_TYPE_TURBO3_0 || kv_type == GGML_TYPE_TURBO4_0 || kv_type == GGML_TYPE_TURBO2_0) {
+        path = FA_SCALAR;
+    }
+
     if (path == FA_COOPMAT1) {
         bool shape_ok = (f32acc && device->coopmat_support_16x16x16_f32acc) ||
                         (!f32acc && device->coopmat_support_16x16x16_f16acc);
@@ -15427,8 +15432,12 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 case GGML_TYPE_TURBO3_0:
                 case GGML_TYPE_TURBO4_0:
                 case GGML_TYPE_TURBO2_0:
-                    // TurboQuant KV-cache types: FA_SCALAR path only
-                    break;
+                    // TurboQuant KV-cache types: FA_SCALAR path only (no coopmat shaders).
+                    // Require subgroup features used by scalar FA.
+                    if (!(device->subgroup_shuffle && device->subgroup_vote)) {
+                        return false;
+                    }
+                    return true;
                 // K dequants currently disabled because D dimension is rounded up to 256 and runs inefficiently
                 //case GGML_TYPE_Q2_K:
                 //case GGML_TYPE_Q3_K:
