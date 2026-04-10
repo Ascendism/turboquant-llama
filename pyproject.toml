@@ -15,15 +15,19 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.9"
+python = ">=3.10"
 numpy = "^1.25.0"
 sentencepiece = ">=0.1.98,<0.3.0"
-transformers = "==5.5.1"
-protobuf = ">=4.21.0,<5.0.0"
+transformers = "^5.5.3"
+protobuf = ">=4.25.9,<7"
+urllib3 = ">=2.6.0"
+certifi = ">=2025.11.12"
+aiohttp = ">=3.13.0"
+idna = ">=3.10"
 gguf = { path = "./gguf-py" }
 torch = { version = "^2.2.0", source = "pytorch" }
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 pytest = "^5.2"
 
 
