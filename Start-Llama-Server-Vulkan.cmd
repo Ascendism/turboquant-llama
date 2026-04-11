@@ -7,8 +7,11 @@ set "HF_HUB_CACHE=%~dp0hf-hub-empty"
 if not exist "%HF_HUB_CACHE%" mkdir "%HF_HUB_CACHE%"
 
 set "LLAMA_EXE=%~dp0build-vulkan\bin\Release\llama-server.exe"
+if not exist "%LLAMA_EXE%" set "LLAMA_EXE=%~dp0build-vulkan\bin\llama-server.exe"
 if not exist "%LLAMA_EXE%" (
-  echo Missing: %LLAMA_EXE%
+  echo Could not find llama-server.exe in:
+  echo   %~dp0build-vulkan\bin\Release\
+  echo   %~dp0build-vulkan\bin\
   echo.
   echo Build first:
   echo   cmake -B build-vulkan -DGGML_VULKAN=ON -DGGML_NATIVE=ON ^&^& cmake --build build-vulkan --config Release
