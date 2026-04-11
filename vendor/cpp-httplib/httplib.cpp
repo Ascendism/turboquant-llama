@@ -1460,8 +1460,15 @@ bool mmap::open(const char *path) {
   auto wpath = u8string_to_wstring(path);
   if (wpath.empty()) { return false; }
 
+  // CreateFile2 requires Windows 8+ SDK. Fall back to CreateFileW for
+  // older MinGW-w64 toolchains (e.g. Strawberry Perl) that don't ship it.
+#if defined(__MINGW32__) || !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
+  hFile_ = ::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+#else
   hFile_ = ::CreateFile2(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                          OPEN_EXISTING, NULL);
+#endif
 
   if (hFile_ == INVALID_HANDLE_VALUE) { return false; }
 
